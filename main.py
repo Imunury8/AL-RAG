@@ -5,8 +5,12 @@ import tempfile
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from dotenv import load_dotenv
 
+from pydantic import BaseModel
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate
+
 # --- 추가: .env 파일 로드 ---
-load_dotenv()
+load_dotenv(override=True)
 
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -101,3 +105,71 @@ async def upload_and_extract_zip(file: UploadFile = File(...)):
     except Exception as e:
         shutil.rmtree(temp_dir, ignore_errors=True)
         raise HTTPException(status_code=500, detail=f"파일 처리 중 오류 발생: {str(e)}")
+
+# 사용자가 보낼 질문 형식을 정의하는 모델
+class QuestionRequest(BaseModel):
+    question: str
+
+@app.post("/ask/")
+async def ask_question(req: QuestionRequest):
+    try:
+        # 1. 저장된 Vector DB 불러오기
+        embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+        persist_directory = "./chroma_db"
+        
+        # DB 폴더가 있는지 먼저 확인
+        if not os.path.exists(persist_directory):
+            raise HTTPException(status_code=400, detail="Vector DB가 없습니다. 먼저 ZIP 파일을 업로드해주세요.")
+            
+        db = Chroma(persist_directory=persist_directory, embedding_function=embeddings)
+
+        # 2. 질문과 가장 관련성이 높은 문서 조각(Chunk) 3개 검색 (Retriever)
+        retriever = db.as_retriever(search_kwargs={"k": 3})
+        docs = retriever.invoke(req.question)
+
+        if not docs:
+            return {"answer": "관련된 문서를 찾을 수 없습니다.", "citations": []}
+
+        # 3. 검색된 문서 내용과 출처(메타데이터)를 LLM에게 줄 컨텍스트로 정리
+        context_text = ""
+        citations = []
+        
+        for i, doc in enumerate(docs):
+            # 경로에서 파일명만 깔끔하게 추출
+            source_path = doc.metadata.get("source", "알 수 없는 문서")
+            file_name = os.path.basename(source_path)
+            page = doc.metadata.get("page", "알 수 없음")
+            
+            context_text += f"\n[문서 {i+1}] 출처: {file_name} (페이지/위치: {page})\n내용: {doc.page_content}\n"
+            
+            # 프론트엔드에서 활용하기 좋게 출처만 따로 배열로 저장
+            citations.append({"file_name": file_name, "page": page})
+
+        # 4. LLM 세팅 및 프롬프트 작성 (환각 방지 강조)
+        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0) # temperature=0으로 설정해 창의성보다 정확도 우선
+        
+        prompt_template = ChatPromptTemplate.from_template(
+            "당신은 제공된 문서만을 기반으로 답변하는 스마트 AI 어시스턴트입니다.\n"
+            "아래 제공된 [Context]를 바탕으로 질문에 답변하세요.\n"
+            "답변 내용의 끝에는 반드시 참조한 문서의 [출처(파일명 및 페이지)]를 요약해서 명시하세요.\n"
+            "만약 [Context]에 질문에 대한 명확한 답이 없다면, 지어내지 말고 '제공된 문서에서 내용을 찾을 수 없습니다.'라고 답변하세요.\n\n"
+            "[Context]\n{context}\n\n"
+            "질문: {question}"
+        )
+        
+        # 5. 체인(Chain) 실행하여 최종 답변 얻기
+        chain = prompt_template | llm
+        response = chain.invoke({
+            "context": context_text, 
+            "question": req.question
+        })
+
+        # 6. 최종 결과 반환
+        return {
+            "question": req.question,
+            "answer": response.content,
+            "citations": citations
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"답변 생성 중 오류 발생: {str(e)}")
