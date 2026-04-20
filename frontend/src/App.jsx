@@ -57,7 +57,7 @@ function App() {
   return (
     <div className="min-h-screen bg-gray-50 p-8 font-sans">
       <div className="max-w-4xl mx-auto space-y-6">
-        <h1 className="text-3xl font-bold text-blue-600">ALZip + AI 문서 에이전트</h1>
+        {/* <h1 className="text-3xl font-bold text-blue-600">ALZip + AI 문서 에이전트</h1> */}
 
         {/* 업로드 섹션 */}
         <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
@@ -66,7 +66,7 @@ function App() {
               type="file"
               accept=".zip"
               onChange={(e) => setFile(e.target.files[0])}
-              className="flex-1 text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+              className="flex-1 text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-s file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
             />
             <button
               onClick={handleUpload}
@@ -84,7 +84,7 @@ function App() {
           <div className="flex-1 overflow-y-auto p-6 space-y-4">
             {chatHistory.map((msg, idx) => (
               <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                <div className={`max-w-[80%] p-4 rounded-2xl ${msg.role === 'user' ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-800'}`}>
+                <div className={`max-w-[80%] text-xs p-4 rounded-2xl ${msg.role === 'user' ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-800'}`}>
                   <p className="whitespace-pre-wrap">{msg.content}</p>
                   {msg.citations && (
                     <div className="mt-3 pt-2 border-t border-gray-200 text-xs text-gray-500">

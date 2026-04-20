@@ -38,6 +38,10 @@ import time  # 추가
 # 마크다운(Markdown) 파서 도입
 import pymupdf4llm
 
+from langchain_classic.agents import AgentExecutor, create_openai_tools_agent
+from langchain_core.tools import tool
+from langchain_classic import hub
+
 app = FastAPI()
 
 # FastAPI 객체 생성 직후에 추가
@@ -52,7 +56,68 @@ app.add_middleware(
 # 전역 변수로 벡터 DB 인스턴스를 보관 (단일 세션 MVP용)
 vector_store = None
 
-import pymupdf4llm # 맨 위에 추가
+# 🔥 1. RAG 검색 도구 정의
+# 🔥 1. RAG 검색 도구 정의 (수정됨)
+@tool
+def search_company_documents(query: str) -> str:
+    """기업의 실적, 매출, 영업이익 등 문서 내의 정보를 검색할 때 사용합니다. 
+    질문이 구체적일수록 정확한 정보를 찾아옵니다."""
+    
+    embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+    persist_directory = "./chroma_db"
+    db = Chroma(persist_directory=persist_directory, embedding_function=embeddings)
+    
+    vector_retriever = db.as_retriever(search_kwargs={"k": 10})
+    with open("bm25_index.pkl", "rb") as f:
+        bm25_retriever = pickle.load(f)
+        
+    bm25_retriever.k = 10  # 🔥 여기서도 k값을 10으로 늘려야 합니다!
+    
+    ensemble_retriever = EnsembleRetriever(
+        retrievers=[bm25_retriever, vector_retriever], weights=[0.5, 0.5]
+    )
+    
+    docs = ensemble_retriever.invoke(query)
+    
+    # 🔥 에이전트가 출처를 알 수 있도록 텍스트 앞에 파일명을 붙여서 반환
+    result_texts = []
+    for d in docs:
+        source = d.metadata.get("source", "알 수 없는 문서")
+        result_texts.append(f"--- [문서 출처: {source}] ---\n{d.page_content}")
+        
+    return "\n\n".join(result_texts)
+
+# 🔥 2. 계산기 도구 정의
+@tool
+def calculate(expression: str) -> str:
+    """숫자 계산이나 합산, 평균 계산이 필요할 때 사용합니다. 
+    파이썬의 eval() 함수처럼 수학 식을 입력받아 결과를 반환합니다."""
+    try:
+        # 안전한 계산을 위해 파이썬 내장 라이브러리 활용
+        return str(eval(expression.replace(',', '')))
+    except Exception as e:
+        return f"계산 오류: {str(e)}"
+
+# 🔥 3. 에이전트 초기화 (수정됨)
+tools = [search_company_documents, calculate]
+
+# OpenAI 에이전트용 표준 프롬프트 불러오기
+prompt = hub.pull("hwchase17/openai-tools-agent")
+
+# 🔥 잃어버렸던 수석 분석가 프롬프트를 에이전트의 뇌(System Message)에 이식
+prompt.messages[0].prompt.template = (
+    "당신은 제공된 기업 실적 문서와 마크다운(Markdown) 표를 완벽하게 해독하는 수석 데이터 분석가입니다.\n"
+    "사용자의 질문에 답하기 위해 'search_company_documents' 도구를 사용하여 관련 문서를 꼼꼼히 검색하세요.\n"
+    "수학적 계산이나 합산이 필요하다면 당신이 직접 계산하지 말고 반드시 'calculate' 도구를 사용하세요.\n"
+    "🚨 [분석 지침]\n"
+    "1. 표(Table) 데이터가 있다면 행(Row)과 열(Column)의 맥락을 꼼꼼히 파악하여 숫자를 읽어내세요.\n"
+    "2. 검색된 문서 데이터 상단에 있는 [문서 출처: 파일명]을 확인하고, 답변의 끝에 반드시 출처를 명시하세요.\n"
+    "3. 제공된 문서에 내용이 없다면 억지로 지어내지 말고 '문서에서 내용을 찾을 수 없습니다'라고 솔직하게 답변하세요."
+)
+
+llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+agent = create_openai_tools_agent(llm, tools, prompt)
+agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
 
 def process_and_chunk_files(file_paths):
     docs = []
@@ -61,18 +126,21 @@ def process_and_chunk_files(file_paths):
     for path in file_paths:
         file_name = os.path.basename(path)
         
+        # ==========================================
+        # 1. PDF 파일 처리 (마크다운 텍스트 + 이미지 추출)
+        # ==========================================
         if path.lower().endswith(".pdf"):
-            # 🔥 1. 표와 텍스트를 마크다운 형식으로 완벽하게 구조화해서 추출
-            md_text = pymupdf4llm.to_markdown(path)
+            print(f"📄 PDF 처리 중: {file_name}")
             
-            # 마크다운 텍스트를 통째로 Document로 추가 (나중에 스플리터가 자름)
+            # [A] 텍스트 및 표 처리: pymupdf4llm을 사용해 마크다운으로 깔끔하게 추출
+            md_text = pymupdf4llm.to_markdown(path)
             if md_text.strip():
                 docs.append(Document(
                     page_content=md_text, 
                     metadata={"source": file_name, "type": "markdown_text"}
                 ))
             
-            # 🔥 2. 이미지 추출 로직은 기존과 동일하게 유지 (그래프, 차트용)
+            # [B] 이미지/그래프 처리: PyMuPDF(fitz)로 좌표 기반 이미지 탐색
             pdf_document = fitz.open(path)
             for page_num in range(len(pdf_document)):
                 page = pdf_document.load_page(page_num)
@@ -85,37 +153,59 @@ def process_and_chunk_files(file_paths):
                     height = base_image.get("height", 0)
                     image_bytes = base_image["image"]
                     
+                    # 🚨 쓰레기 데이터 필터링 
+                    # 너무 작거나(아이콘, 로고), 너무 큰(PPT 배경 템플릿) 이미지는 버림
                     if width < 150 or height < 150 or len(image_bytes) < 10240:
                         continue 
                     if width > 1200 or height > 1200:
                         continue
                         
+                    # 당장 API를 쏘지 않고 '대기열 리스트'에 차곡차곡 담아둠
                     images_to_summarize.append((image_bytes, file_name, page_num + 1))
+                    
             pdf_document.close()
             
+        # ==========================================
+        # 2. TXT 파일 처리 (단순 텍스트)
+        # ==========================================
         elif path.lower().endswith(".txt"):
+            print(f"📝 TXT 처리 중: {file_name}")
             with open(path, "r", encoding="utf-8") as f:
-                docs.append(Document(page_content=f.read(), metadata={"source": file_name}))
+                docs.append(Document(
+                    page_content=f.read(), 
+                    metadata={"source": file_name, "type": "text"}
+                ))
 
-    # 멀티스레딩 이미지 요약 로직 (기존과 완전히 동일하게 유지)
+    # ==========================================
+    # 3. 이미지 병렬 요약 (멀티스레딩)
+    # ==========================================
     if images_to_summarize:
-        print(f"\n🚀 총 {len(images_to_summarize)}개의 유의미한 이미지를 동시에 분석합니다...")
+        print(f"\n🚀 총 {len(images_to_summarize)}개의 유의미한 이미지를 병렬 분석합니다...")
+        
+        # 워커(Worker) 4명을 투입해 대기열의 이미지를 동시에 API로 쏴서 요약
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
             future_to_image = {
                 executor.submit(summarize_image_with_vision, img[0], img[1], img[2]): img 
                 for img in images_to_summarize
             }
+            
             for future in concurrent.futures.as_completed(future_to_image):
                 try:
-                    result_doc = future.result()
+                    result_doc = future.result() # 요약된 Document 객체 반환
                     if result_doc:
                         docs.append(result_doc)
                 except Exception as exc:
-                    print(f"에러: {exc}")
+                    print(f"❌ 이미지 분석 중 에러 발생: {exc}")
 
-    # 청킹 (마크다운 구조가 깨지지 않도록 사이즈를 넉넉하게 1000 이상으로 유지)
+    # ==========================================
+    # 4. 문서 청킹 (Chunking)
+    # ==========================================
+    print(f"\n✂️ 추출된 문서를 청킹합니다...")
+    # 마크다운 표 구조가 중간에 잘리지 않도록 chunk_size를 1000 이상으로 넉넉하게 잡음
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     chunks = text_splitter.split_documents(docs)
+    
+    print(f"✅ 총 {len(chunks)}개의 데이터 조각(Chunk)이 완성되었습니다.\n")
     return chunks
 
 def summarize_image_with_vision(image_bytes, file_name, page_num):
@@ -158,82 +248,6 @@ def summarize_image_with_vision(image_bytes, file_name, page_num):
     except Exception as e:
         print(f"이미지 요약 중 오류 발생: {e}")
         return None
-
-def process_and_chunk_files(file_paths):
-    docs = []
-    images_to_summarize = [] # 🔥 요약할 이미지들을 모아둘 대기열
-    
-    for path in file_paths:
-        file_name = os.path.basename(path)
-        
-        if path.lower().endswith(".pdf"):
-            pdf_document = fitz.open(path)
-            
-            for page_num in range(len(pdf_document)):
-                page = pdf_document.load_page(page_num)
-                
-                # A. 텍스트 추출 (기존 유지)
-                text = page.get_text()
-                if text.strip():
-                    docs.append(Document(
-                        page_content=text, 
-                        metadata={"source": file_name, "page": page_num + 1, "type": "text"}
-                    ))
-                
-                # B. 이미지 추출 및 대기열에 담기 (기다리지 않음!)
-                image_list = page.get_images(full=True)
-                for img_index, img in enumerate(image_list):
-                    xref = img[0]
-                    base_image = pdf_document.extract_image(xref)
-                    
-                    width = base_image.get("width", 0)
-                    height = base_image.get("height", 0)
-                    image_bytes = base_image["image"]
-                    
-                    # 🔥 1. 극강의 필터링: 작은 로고 거르기 + '거대한 PPT 배경화면' 거르기
-                    # (보통 가로나 세로가 1000px을 넘어가면 슬라이드 배경 템플릿입니다)
-                    if width < 150 or height < 150 or len(image_bytes) < 10240:
-                        continue 
-                    if width > 1200 or height > 1200:
-                        continue
-                    
-                    images_to_summarize.append((image_bytes, file_name, page_num + 1))
-            
-            pdf_document.close()
-            
-        elif path.lower().endswith(".txt"):
-            with open(path, "r", encoding="utf-8") as f:
-                text = f.read()
-                docs.append(Document(
-                    page_content=text, 
-                    metadata={"source": file_name, "page": 1, "type": "text"}
-                ))
-
-    # 🔥 C. 대기열에 모인 이미지를 '멀티스레딩'으로 한 번에(동시에) 요약
-    if images_to_summarize:
-        print(f"\n🚀 총 {len(images_to_summarize)}개의 유의미한 이미지를 동시에 분석합니다...")
-        
-        # max_workers=10 이면 10개의 이미지를 동시에 처리합니다.
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-            # 모든 작업을 스레드 풀에 던짐
-            future_to_image = {
-                executor.submit(summarize_image_with_vision, img[0], img[1], img[2]): img 
-                for img in images_to_summarize
-            }
-            
-            # 완료되는 대로 받아서 docs에 추가
-            for future in concurrent.futures.as_completed(future_to_image):
-                try:
-                    result_doc = future.result()
-                    if result_doc:
-                        docs.append(result_doc)
-                except Exception as exc:
-                    print(f"이미지 병렬 처리 중 에러 발생: {exc}")
-
-    # 문서 청킹 (기존 유지)
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
-    chunks = text_splitter.split_documents(docs)
-    return chunks
 
 @app.post("/upload-zip/")
 async def upload_and_extract_zip(file: UploadFile = File(...)):
@@ -310,80 +324,14 @@ class QuestionRequest(BaseModel):
 @app.post("/ask/")
 async def ask_question(req: QuestionRequest):
     try:
-        embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
-        persist_directory = "./chroma_db"
+        # 이제 직접 검색하는 대신 에이전트에게 질문을 던집니다.
+        # 에이전트가 질문을 보고 search_company_documents를 쓸지, calculate를 쓸지 결정합니다.
+        response = agent_executor.invoke({"input": req.question})
         
-        if not os.path.exists(persist_directory):
-            raise HTTPException(status_code=400, detail="DB가 없습니다. 파일을 먼저 업로드하세요.")
-            
-        # 3. embedding_function 파라미터 확인
-        db = Chroma(persist_directory=persist_directory, embedding_function=embeddings)
-        vector_retriever = db.as_retriever(search_kwargs={"k": 10})
-
-        if not os.path.exists("bm25_index.pkl"):
-            raise HTTPException(status_code=400, detail="BM25 인덱스가 없습니다.")
-            
-        with open("bm25_index.pkl", "rb") as f:
-            bm25_retriever = pickle.load(f)
-        
-        bm25_retriever.k = 10
-
-        # 하이브리드 검색기 가동
-        ensemble_retriever = EnsembleRetriever(
-            retrievers=[bm25_retriever, vector_retriever], 
-            weights=[0.5, 0.5]
-        )
-
-        # 2. 질문과 가장 관련성이 높은 문서 조각(Chunk) 3개 검색 (Retriever)
-        docs = ensemble_retriever.invoke(req.question)
-
-        if not docs:
-            return {"answer": "관련된 문서를 찾을 수 없습니다.", "citations": []}
-
-        # 3. 검색된 문서 내용과 출처(메타데이터)를 LLM에게 줄 컨텍스트로 정리
-        context_text = ""
-        citations = []
-        
-        for i, doc in enumerate(docs):
-            # 경로에서 파일명만 깔끔하게 추출
-            source_path = doc.metadata.get("source", "알 수 없는 문서")
-            file_name = os.path.basename(source_path)
-            page = doc.metadata.get("page", "알 수 없음")
-            
-            context_text += f"\n[문서 {i+1}] 출처: {file_name} (페이지/위치: {page})\n내용: {doc.page_content}\n"
-            
-            # 프론트엔드에서 활용하기 좋게 출처만 따로 배열로 저장
-            citations.append({"file_name": file_name, "page": page})
-
-        # 4. LLM 세팅 및 프롬프트 작성 (환각 방지 강조)
-        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0) # temperature=0으로 설정해 창의성보다 정확도 우선
-        
-        prompt_template = ChatPromptTemplate.from_template(
-            "당신은 제공된 기업 실적 문서와 마크다운(Markdown) 표를 완벽하게 해독하는 수석 데이터 분석가입니다.\n"
-            "아래 제공된 [Context]를 바탕으로 질문에 답변하세요.\n\n"
-            "🚨 [분석 지침]\n"
-            "1. 표(Table) 데이터가 있다면 행(Row)과 열(Column)의 맥락을 꼼꼼히 파악하여 숫자를 읽어내세요.\n"
-            "2. 여러 분기(1Q, 2Q 등)의 데이터가 흩어져 있다면, 이를 종합하거나 합산하여 사용자가 원하는 단위(예: 연간 실적)로 정리해서 답변하세요.\n"
-            "3. '매출', '영업이익', '순이익' 등의 핵심 재무 지표를 헷갈리지 마세요.\n"
-            "4. 답변 내용의 끝에는 반드시 참조한 문서의 [출처(파일명)]를 명시하세요.\n"
-            "5. 제공된 [Context] 안의 내용으로 도저히 유추할 수 없는 질문에만 '문서에서 내용을 찾을 수 없습니다.'라고 답변하세요.\n\n"
-            "[Context]\n{context}\n\n"
-            "질문: {question}"
-        )
-        
-        # 5. 체인(Chain) 실행하여 최종 답변 얻기
-        chain = prompt_template | llm
-        response = chain.invoke({
-            "context": context_text, 
-            "question": req.question
-        })
-
-        # 6. 최종 결과 반환
+        # 에이전트가 최종적으로 내놓은 답변 반환
         return {
-            "question": req.question,
-            "answer": response.content,
-            "citations": citations
+            "answer": response["output"],
+            "citations": [] # 에이전트 모드에서는 출처 추출 로직을 추가로 커스텀해야 합니다.
         }
-
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"답변 생성 중 오류 발생: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
