@@ -9,6 +9,8 @@ from pydantic import BaseModel
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 
+from fastapi.middleware.cors import CORSMiddleware
+
 # --- 추가: .env 파일 로드 ---
 load_dotenv(override=True)
 
@@ -18,7 +20,20 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
 from langchain_chroma import Chroma
 
+from langchain_community.retrievers import BM25Retriever
+from langchain.retrievers import EnsembleRetriever
+import pickle # BM25 인덱스를 파일로 저장하기 위함
+
 app = FastAPI()
+
+# FastAPI 객체 생성 직후에 추가
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], # 개발 환경에서는 모두 허용
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # 전역 변수로 벡터 DB 인스턴스를 보관 (단일 세션 MVP용)
 vector_store = None
