@@ -1,1 +1,64 @@
+# =========================
+# 1. 환경 변수 및 비밀 키
+# =========================
 .env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# =========================
+# 2. Python & Backend (FastAPI)
+# =========================
+# 가상 환경
+venv/
+.venv/
+env/
+
+# 파이썬 캐시
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 데이터베이스 및 인덱스 파일 (ChromaDB, BM25 등)
+chroma_db/
+*.pkl
+bm25_index.pkl
+*.sqlite3
+*.db
+
+# =========================
+# 3. Node.js & Frontend (React/Vite)
+# =========================
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+frontend/.eslintcache
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# =========================
+# 4. OS 및 에디터 설정 파일
+# =========================
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Mac
+.DS_Store
+
+# IDE (VSCode, PyCharm 등)
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# =========================
+# 5. 테스트용 대용량 파일 (GitHub 100MB 제한 방지)
+# =========================
+test/test_stock.zip
+test/**/*.pdf
+*.zip
